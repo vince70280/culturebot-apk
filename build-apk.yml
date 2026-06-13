@@ -32,6 +32,9 @@ jobs:
       - name: 📦 npm install
         run: npm install
 
+      - name: 📦 Générer le lock file
+        run: npm install --package-lock-only
+
       - name: 🏗️ Build Vite → dist/
         run: npm run build
 
@@ -65,12 +68,3 @@ jobs:
           name: CultureBot-APK
           path: android/app/build/outputs/apk/debug/CultureBot-*.apk
           retention-days: 30
-
-      - name: ✅ Résumé du build
-        run: |
-          echo "## 🧠 CultureBot APK compilé !" >> $GITHUB_STEP_SUMMARY
-          echo "**Build :** #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit :** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📥 Télécharge l'APK dans l'onglet **Artifacts** ci-dessus." >> $GITHUB_STEP_SUMMARY
-          echo "Pour installer : active *Sources inconnues* dans Paramètres → Sécurité" >> $GITHUB_STEP_SUMMARY
