@@ -1,0 +1,25 @@
+{
+  "name": "culture-bot-apk",
+  "version": "1.0.0",
+  "description": "App Android de culture générale avec anecdotes hors ligne",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "cap:init": "cap init CultureBot com.culturebot.app",
+    "cap:add": "cap add android",
+    "cap:sync": "cap sync android",
+    "cap:open": "cap open android",
+    "deploy": "npm run build && cap sync android && cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/app": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/local-notifications": "^6.0.0",
+    "@capacitor/storage": "^1.2.5"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0",
+    "vite": "^5.0.0"
+  }
+}
