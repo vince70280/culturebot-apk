@@ -2,6 +2,7 @@
 // CultureBot APK — Application principale
 
 import { FACTS, CATEGORIES, getRandomFact } from './facts.js';
+import { LocalNotifications } from '@capacitor/local-notifications';
 
 // ── Storage helpers ───────────────────────────────────────────
 const STORAGE_KEY = 'culturebot_prefs';
@@ -31,31 +32,50 @@ let prefs = loadPrefs();
 let currentFact = null;
 let currentView = 'home'; // 'home' | 'config' | 'stats'
 let isFlipped = false;
-let notifTimer = null;
 
-// ── Notification helpers ──────────────────────────────────────
+// ── Notification helpers (Capacitor natif) ─────────────────────
+const NOTIF_BATCH_SIZE = 64; // Nombre de notifs planifiées d'avance
+
 async function requestNotifPermission() {
-  if (!('Notification' in window)) return false;
-  if (Notification.permission === 'granted') return true;
-  const result = await Notification.requestPermission();
-  return result === 'granted';
+  const perm = await LocalNotifications.checkPermissions();
+  if (perm.display === 'granted') return true;
+  const req = await LocalNotifications.requestPermissions();
+  return req.display === 'granted';
 }
 
-function scheduleNotif() {
-  if (notifTimer) clearTimeout(notifTimer);
+/**
+ * Planifie un lot de notifications futures, espacées de prefs.intervalMin.
+ * On planifie un "batch" entier d'avance (ex: 64 notifs) pour que les
+ * rappels continuent d'arriver même si l'app reste fermée longtemps.
+ */
+async function scheduleNotif() {
+  // Annule toutes les notifications déjà planifiées
+  const pending = await LocalNotifications.getPending();
+  if (pending.notifications.length > 0) {
+    await LocalNotifications.cancel({ notifications: pending.notifications });
+  }
+
   if (!prefs.notifEnabled) return;
-  const ms = prefs.intervalMin * 60 * 1000;
-  notifTimer = setTimeout(() => {
-    const fact = getRandomFact(prefs.activeCats, prefs.recentIds);
-    if (Notification.permission === 'granted') {
-      new Notification('🧠 CultureBot', {
-        body: fact.text,
-        icon: '/icon.png',
-        badge: '/icon.png',
-      });
-    }
-    scheduleNotif(); // Replanifie
-  }, ms);
+
+  const intervalMs = prefs.intervalMin * 60 * 1000;
+  const notifications = [];
+  let recent = [...prefs.recentIds];
+
+  for (let i = 0; i < NOTIF_BATCH_SIZE; i++) {
+    const fact = getRandomFact(prefs.activeCats, recent);
+    recent = [fact.id, ...recent].slice(0, 30);
+
+    notifications.push({
+      id: 1000 + i,
+      title: '🧠 CultureBot',
+      body: fact.text,
+      schedule: { at: new Date(Date.now() + intervalMs * (i + 1)) },
+      smallIcon: 'ic_stat_brain',
+      iconColor: '#2979FF',
+    });
+  }
+
+  await LocalNotifications.schedule({ notifications });
 }
 
 // ── Fact logic ────────────────────────────────────────────────
@@ -343,23 +363,22 @@ function attachEvents() {
     }
     prefs.notifEnabled = e.target.checked;
     savePrefs(prefs);
-    scheduleNotif();
-    showToast(prefs.notifEnabled ? '🔔 Notifications activées !' : '🔕 Notifications désactivées');
+    scheduleNotif().catch(console.error);
   });
 
   // Config — intervals
   document.querySelectorAll('[data-val]').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       prefs.intervalMin = parseInt(btn.dataset.val, 10);
       savePrefs(prefs);
-      scheduleNotif();
+      await scheduleNotif();
       render();
     });
   });
 
   // Config — categories
   document.querySelectorAll('[data-cat]').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const id = btn.dataset.cat;
       const isOn = prefs.activeCats.includes(id);
       if (isOn && prefs.activeCats.length === 1) {
@@ -370,6 +389,7 @@ function attachEvents() {
         ? prefs.activeCats.filter(c => c !== id)
         : [...prefs.activeCats, id];
       savePrefs(prefs);
+      await scheduleNotif();
       render();
     });
   });
