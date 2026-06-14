@@ -27,7 +27,7 @@ jobs:
           java-version: '17'
 
       - name: 📱 Configurer Android SDK
-        run: |
+        run:
           export ANDROID_HOME=$HOME/android-sdk
           mkdir -p $ANDROID_HOME/cmdline-tools
           cd $ANDROID_HOME/cmdline-tools
