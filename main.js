@@ -1,767 +1,636 @@
-// src/main.js
-// CultureBot APK — Application principale
+// main.js — CultureBot APK — Design Premium
 
 import { FACTS, CATEGORIES, getRandomFact } from './facts.js';
 import { LocalNotifications } from '@capacitor/local-notifications';
-// Écoute le clic sur une notification → affiche le fait correspondant
-LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
-  const body = action.notification.body;
-  if (body) {
-    // Retrouve le fait correspondant au texte de la notification
-    const fact = FACTS.find(f => f.text === body);
-    if (fact) {
-      currentFact = fact;
-    } else {
-      // Texte non trouvé (tronqué par Android) → charge un fait aléatoire
-      currentFact = getRandomFact(prefs.activeCats, prefs.recentIds);
-    }
-    currentView = 'home';
-    isFlipped = false;
-    render();
-  }
-});
-// ── Storage helpers ───────────────────────────────────────────
-const STORAGE_KEY = 'culturebot_prefs';
 
+// ── Storage ───────────────────────────────────────────────────
+const STORAGE_KEY = 'culturebot_v2';
 function loadPrefs() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch (_) {}
-  return {
-    activeCats: Object.keys(CATEGORIES),
-    intervalMin: 60,
-    recentIds: [],
-    streak: 0,
-    totalSeen: 0,
-    lastSeen: null,
-    notifEnabled: false,
-  };
+  try { const r = localStorage.getItem(STORAGE_KEY); if (r) return JSON.parse(r); } catch (_) {}
+  return { activeCats: Object.keys(CATEGORIES), intervalMin: 60, recentIds: [], streak: 0, totalSeen: 0, lastSeen: null, notifEnabled: false };
 }
-
-function savePrefs(prefs) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
-}
+function savePrefs(p) { localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); }
 
 // ── State ─────────────────────────────────────────────────────
-let prefs = loadPrefs();
+let prefs       = loadPrefs();
 let currentFact = null;
-let currentView = 'home'; // 'home' | 'config' | 'stats'
-let isFlipped = false;
+let currentView = 'home';
+let isFlipped   = false;
 
-// ── Notification helpers (Capacitor natif) ─────────────────────
-const NOTIF_BATCH_SIZE = 64; // Nombre de notifs planifiées d'avance
-
+// ── Notifications natives ─────────────────────────────────────
 async function requestNotifPermission() {
-  const perm = await LocalNotifications.checkPermissions();
-  if (perm.display === 'granted') return true;
-  const req = await LocalNotifications.requestPermissions();
-  return req.display === 'granted';
+  const p = await LocalNotifications.checkPermissions();
+  if (p.display === 'granted') return true;
+  const r = await LocalNotifications.requestPermissions();
+  return r.display === 'granted';
 }
-
-/**
- * Planifie un lot de notifications futures, espacées de prefs.intervalMin.
- * On planifie un "batch" entier d'avance (ex: 64 notifs) pour que les
- * rappels continuent d'arriver même si l'app reste fermée longtemps.
- */
 async function scheduleNotif() {
-  // Annule toutes les notifications déjà planifiées
   const pending = await LocalNotifications.getPending();
-  if (pending.notifications.length > 0) {
+  if (pending.notifications.length > 0)
     await LocalNotifications.cancel({ notifications: pending.notifications });
-  }
-
   if (!prefs.notifEnabled) return;
-
-  const intervalMs = prefs.intervalMin * 60 * 1000;
-  const notifications = [];
-  let recent = [...prefs.recentIds];
-
-  for (let i = 0; i < NOTIF_BATCH_SIZE; i++) {
-    const fact = getRandomFact(prefs.activeCats, recent);
-    recent = [fact.id, ...recent].slice(0, 30);
-
-    notifications.push({
-      id: 1000 + i,
-      title: '🧠 CultureBot',
-      body: fact.text,
-      schedule: { at: new Date(Date.now() + intervalMs * (i + 1)) },
-      smallIcon: 'ic_stat_brain',
-      iconColor: '#2979FF',
-      actionTypeId: 'OPEN_FACT',
-      extra: { factId: fact.id },
-    });
+  const ms = prefs.intervalMin * 60 * 1000;
+  const notifs = []; let recent = [...prefs.recentIds];
+  for (let i = 0; i < 64; i++) {
+    const f = getRandomFact(prefs.activeCats, recent);
+    recent = [f.id, ...recent].slice(0, 30);
+    notifs.push({ id: 1000 + i, title: '🧠 CultureBot', body: f.text,
+      schedule: { at: new Date(Date.now() + ms * (i + 1)) },
+      smallIcon: 'ic_stat_brain', iconColor: '#7C3AED',
+      actionTypeId: 'OPEN_FACT', extra: { factId: f.id } });
   }
-
-  await LocalNotifications.schedule({ notifications });
+  await LocalNotifications.schedule({ notifications: notifs });
 }
+LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
+  const factId = action.notification.extra?.factId;
+  const fact = factId ? FACTS.find(f => f.id === factId) : null;
+  currentFact = fact || getRandomFact(prefs.activeCats, prefs.recentIds);
+  if (fact) { prefs.recentIds = [fact.id, ...prefs.recentIds].slice(0, 30); prefs.totalSeen++; savePrefs(prefs); }
+  currentView = 'home'; isFlipped = false; render();
+});
 
 // ── Fact logic ────────────────────────────────────────────────
 function loadNewFact() {
   currentFact = getRandomFact(prefs.activeCats, prefs.recentIds);
   isFlipped = false;
-
-  // Historique anti-doublons (max 30)
   prefs.recentIds = [currentFact.id, ...prefs.recentIds].slice(0, 30);
   prefs.totalSeen++;
-
-  // Streak
   const today = new Date().toDateString();
   if (prefs.lastSeen !== today) {
-    prefs.streak = (prefs.lastSeen === new Date(Date.now() - 86400000).toDateString())
-      ? prefs.streak + 1 : 1;
+    prefs.streak = prefs.lastSeen === new Date(Date.now()-86400000).toDateString() ? prefs.streak+1 : 1;
     prefs.lastSeen = today;
   }
-
-  savePrefs(prefs);
-  render();
+  savePrefs(prefs); render();
 }
 
-// ── Intervals config ──────────────────────────────────────────
 const INTERVALS = [
-  { label: '15 min',  value: 15,   emoji: '⚡' },
-  { label: '30 min',  value: 30,   emoji: '🔥' },
-  { label: '1 heure', value: 60,   emoji: '⏰' },
-  { label: '2 heures',value: 120,  emoji: '🕐' },
-  { label: '6 heures',value: 360,  emoji: '🌤' },
-  { label: '12h',     value: 720,  emoji: '🌙' },
-  { label: '1 jour',  value: 1440, emoji: '📅' },
+  { label: '15 minutes', value: 15,   emoji: '⚡' },
+  { label: '30 minutes', value: 30,   emoji: '🔥' },
+  { label: '1 heure',    value: 60,   emoji: '⏰' },
+  { label: '2 heures',   value: 120,  emoji: '🕐' },
+  { label: '6 heures',   value: 360,  emoji: '🌤' },
+  { label: '12 heures',  value: 720,  emoji: '🌙' },
+  { label: '1 jour',     value: 1440, emoji: '📅' },
 ];
 
 // ── Render ────────────────────────────────────────────────────
 function render() {
-  const app = document.getElementById('app');
-  app.innerHTML = buildLayout();
+  document.getElementById('app').innerHTML = buildStyles() + buildUI();
   attachEvents();
 }
 
-function buildLayout() {
+function buildUI() {
   return `
-    <div class="shell">
-      ${buildStatusBar()}
-      ${buildHeader()}
-      <div class="body">
-        ${currentView === 'home'   ? buildHome()   : ''}
-        ${currentView === 'config' ? buildConfig() : ''}
-        ${currentView === 'stats'  ? buildStats()  : ''}
-      </div>
-      ${buildNav()}
+  <div class="shell">
+    ${buildHeader()}
+    <div class="body">
+      ${currentView === 'home'   ? buildHome()   : ''}
+      ${currentView === 'config' ? buildConfig() : ''}
+      ${currentView === 'stats'  ? buildStats()  : ''}
     </div>
-    ${buildStyles()}
-  `;
+    ${buildNav()}
+  </div>`;
 }
 
-function buildStatusBar() {
-  const now = new Date();
-  const h = now.getHours().toString().padStart(2, '0');
-  const m = now.getMinutes().toString().padStart(2, '0');
-  return `<div class="status-bar"><span>${h}:${m}</span><span>📶 🔋</span></div>`;
-}
-
+// ── Header ────────────────────────────────────────────────────
 function buildHeader() {
-  const titles = { home: '🧠 CultureBot', config: '⚙️ Paramètres', stats: '📊 Statistiques' };
+  const titles = {
+    home:   `<span class="logo-dot"></span>CultureBot`,
+    config: 'Paramètres',
+    stats:  'Statistiques',
+  };
+  const right = {
+    home:   `<div class="streak-pill">🔥 ${prefs.streak}j</div>`,
+    config: '',
+    stats:  '',
+  };
   return `
-    <div class="header">
-      <div class="header-title">${titles[currentView]}</div>
-      <div class="header-sub">
-        ${currentView === 'home' ? `<span class="streak">🔥 Série : ${prefs.streak} jour${prefs.streak > 1 ? 's' : ''}</span>` : ''}
-      </div>
-    </div>
-  `;
+    <header class="header">
+      <div class="header-left">${titles[currentView]}</div>
+      <div class="header-right">${right[currentView]}</div>
+    </header>`;
 }
 
+// ── Home ──────────────────────────────────────────────────────
 function buildHome() {
-  if (!currentFact) {
-    return `
-      <div class="welcome">
-        <div class="welcome-icon">🧠</div>
-        <h2 class="welcome-title">Prêt à apprendre ?</h2>
-        <p class="welcome-sub">Découvre une nouvelle anecdote fascinante chaque jour.</p>
-        <button class="btn-main" id="btn-first">Commencer ✨</button>
-      </div>
-    `;
-  }
+  if (!currentFact) return `
+    <div class="welcome">
+      <div class="welcome-orb">🧠</div>
+      <h1 class="welcome-title">Cultivez votre<br>curiosité</h1>
+      <p class="welcome-sub">Une anecdote fascinante vous attend.</p>
+      <button class="cta" id="btn-first">Découvrir maintenant</button>
+    </div>`;
 
   const cat = CATEGORIES[currentFact.cat];
-  return `
-    <div class="fact-container">
-      <div class="cat-badge" style="color:${cat.color};border-color:${cat.color}22;background:${cat.color}11">
-        ${cat.emoji} ${cat.label}
-      </div>
-
-      <div class="card ${isFlipped ? 'flipped' : ''}" id="card">
-        <div class="card-front">
-          <div class="card-glow" style="background:${cat.color}"></div>
-          <div class="card-content">
-            <div class="fact-text">${currentFact.text}</div>
-          </div>
-          <div class="card-hint">Appuie sur la carte pour la retourner ↩</div>
-        </div>
-        <div class="card-back">
-          <div class="back-emoji">${cat.emoji}</div>
-          <div class="back-cat">${cat.label}</div>
-          <div class="back-num">Anecdote #${currentFact.id} / ${FACTS.length}</div>
-        </div>
-      </div>
-
-      <div class="action-row">
-        <button class="btn-action" id="btn-share" title="Partager">📤</button>
-        <button class="btn-main" id="btn-next">Suivante →</button>
-        <button class="btn-action" id="btn-fav" title="Favoris">⭐</button>
-      </div>
-
-      <div class="progress-bar">
-        <div class="progress-fill" style="width:${Math.min(100, (prefs.totalSeen / FACTS.length) * 100)}%;background:${cat.color}"></div>
-      </div>
-      <div class="progress-label">${prefs.totalSeen} / ${FACTS.length} anecdotes vues</div>
-    </div>
-  `;
-}
-
-function buildConfig() {
-  const ivLabel = INTERVALS.find(i => i.value === prefs.intervalMin)?.label || '1 heure';
-
-  return `
-    <div class="config-scroll">
-      <section class="config-section">
-        <div class="section-title">🔔 Notifications</div>
-        <div class="notif-row">
-          <div>
-            <div class="notif-label">Rappels automatiques</div>
-            <div class="notif-sub">Reçois une anecdote toutes les ${ivLabel}</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="toggle-notif" ${prefs.notifEnabled ? 'checked' : ''} />
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </section>
-
-      <section class="config-section">
-        <div class="section-title">⏱ Fréquence</div>
-        <div class="interval-list">
-          ${INTERVALS.map(iv => `
-            <button class="interval-btn ${prefs.intervalMin === iv.value ? 'active' : ''}"
-                    data-val="${iv.value}">
-              <span class="iv-emoji">${iv.emoji}</span>
-              <span class="iv-label">Toutes les ${iv.label}</span>
-              ${prefs.intervalMin === iv.value ? '<span class="iv-badge">Actif</span>' : ''}
-            </button>
-          `).join('')}
-        </div>
-      </section>
-
-      <section class="config-section">
-        <div class="section-title">📂 Catégories</div>
-        <div class="cat-grid">
-          ${Object.entries(CATEGORIES).map(([id, cat]) => `
-            <button class="cat-btn ${prefs.activeCats.includes(id) ? 'cat-on' : ''}"
-                    data-cat="${id}"
-                    style="${prefs.activeCats.includes(id)
-                      ? `border-color:${cat.color};color:${cat.color};background:${cat.color}15`
-                      : ''}">
-              ${cat.emoji} ${cat.label}
-            </button>
-          `).join('')}
-        </div>
-      </section>
-
-      <button class="btn-main btn-reset" id="btn-reset-history">🔄 Réinitialiser l'historique</button>
-    </div>
-  `;
-}
-
-function buildStats() {
-  const catCounts = {};
-  Object.keys(CATEGORIES).forEach(c => { catCounts[c] = 0; });
-  // (On pourrait persister le détail, ici on affiche le global)
   const pct = Math.min(100, Math.round((prefs.totalSeen / FACTS.length) * 100));
 
   return `
-    <div class="stats-scroll">
-      <div class="stat-card big">
-        <div class="stat-num">${prefs.totalSeen}</div>
-        <div class="stat-label">Anecdotes découvertes</div>
-      </div>
-      <div class="stat-row">
-        <div class="stat-card">
-          <div class="stat-num">${prefs.streak}</div>
-          <div class="stat-label">🔥 Jours de suite</div>
+    <div class="home-wrap">
+      <div class="cat-chip" style="--c:${cat.color}">${cat.emoji} ${cat.label}</div>
+
+      <div class="card ${isFlipped ? 'flipped' : ''}" id="card">
+        <div class="card-front">
+          <div class="card-glow" style="background:radial-gradient(circle at 70% 30%, ${cat.color}22 0%, transparent 70%)"></div>
+          <blockquote class="fact-text">${currentFact.text}</blockquote>
+          <div class="card-tap">Appuyer pour retourner</div>
         </div>
-        <div class="stat-card">
-          <div class="stat-num">${pct}%</div>
-          <div class="stat-label">📚 Complété</div>
+        <div class="card-back">
+          <div class="back-icon">${cat.emoji}</div>
+          <div class="back-label">${cat.label}</div>
+          <div class="back-num"># ${currentFact.id} sur ${FACTS.length}</div>
         </div>
       </div>
 
-      <div class="stat-card">
-        <div class="section-title" style="margin-bottom:14px">Progression</div>
-        <div class="big-progress">
-          <div class="big-fill" style="width:${pct}%"></div>
-        </div>
-        <div style="text-align:center;margin-top:8px;font-size:13px;color:rgba(255,255,255,0.5)">
-          ${prefs.totalSeen} / ${FACTS.length} anecdotes
-        </div>
+      <div class="actions">
+        <button class="icon-btn" id="btn-share">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+          </svg>
+        </button>
+        <button class="cta flex-cta" id="btn-next">Suivante →</button>
+        <button class="icon-btn" id="btn-save">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+          </svg>
+        </button>
       </div>
 
-      <div class="stat-card">
-        <div class="section-title" style="margin-bottom:14px">Catégories actives</div>
-        ${prefs.activeCats.map(id => {
-          const cat = CATEGORIES[id];
-          return `
-            <div class="cat-stat-row">
-              <span style="color:${cat.color}">${cat.emoji} ${cat.label}</span>
-              <span style="color:rgba(255,255,255,0.4);font-size:13px">
-                ${FACTS.filter(f => f.cat === id).length} anecdotes
-              </span>
-            </div>
-          `;
-        }).join('')}
+      <div class="progress-wrap">
+        <div class="progress-track">
+          <div class="progress-fill" style="width:${pct}%;background:${cat.color}"></div>
+        </div>
+        <div class="progress-label">${prefs.totalSeen} / ${FACTS.length} anecdotes découvertes</div>
       </div>
-    </div>
-  `;
+    </div>`;
 }
 
+// ── Config ────────────────────────────────────────────────────
+function buildConfig() {
+  const ivLabel = INTERVALS.find(i => i.value === prefs.intervalMin)?.label || '1 heure';
+  return `
+    <div class="scroll-wrap">
+
+      <div class="card-section">
+        <div class="section-head">Notifications</div>
+        <div class="row-between">
+          <div>
+            <div class="row-title">Rappels automatiques</div>
+            <div class="row-sub">Toutes les ${ivLabel}</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="toggle-notif" ${prefs.notifEnabled ? 'checked' : ''}>
+            <span class="switch-track"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="card-section">
+        <div class="section-head">Fréquence</div>
+        <div class="iv-list">
+          ${INTERVALS.map(iv => `
+            <button class="iv-row ${prefs.intervalMin === iv.value ? 'iv-active' : ''}" data-val="${iv.value}">
+              <span class="iv-icon">${iv.emoji}</span>
+              <span class="iv-text">Toutes les ${iv.label}</span>
+              ${prefs.intervalMin === iv.value ? '<span class="iv-badge">Actif</span>' : ''}
+            </button>`).join('')}
+        </div>
+      </div>
+
+      <div class="card-section">
+        <div class="section-head">Catégories</div>
+        <div class="cat-grid">
+          ${Object.entries(CATEGORIES).map(([id, cat]) => {
+            const on = prefs.activeCats.includes(id);
+            return `<button class="cat-pill ${on ? 'cat-on' : ''}" data-cat="${id}" ${on ? `style="--c:${cat.color}"` : ''}>
+              ${cat.emoji} ${cat.label}
+            </button>`;
+          }).join('')}
+        </div>
+      </div>
+
+      <button class="ghost-btn" id="btn-reset">Réinitialiser l'historique</button>
+    </div>`;
+}
+
+// ── Stats ─────────────────────────────────────────────────────
+function buildStats() {
+  const pct = Math.min(100, Math.round((prefs.totalSeen / FACTS.length) * 100));
+  return `
+    <div class="scroll-wrap">
+      <div class="stats-hero">
+        <div class="stats-hero-num">${prefs.totalSeen}</div>
+        <div class="stats-hero-label">Anecdotes découvertes</div>
+      </div>
+      <div class="stat-row-grid">
+        <div class="stat-mini">
+          <div class="stat-mini-num">${prefs.streak}</div>
+          <div class="stat-mini-label">🔥 Jours de suite</div>
+        </div>
+        <div class="stat-mini">
+          <div class="stat-mini-num">${pct}%</div>
+          <div class="stat-mini-label">📚 Complété</div>
+        </div>
+      </div>
+      <div class="card-section">
+        <div class="section-head">Progression globale</div>
+        <div class="big-track"><div class="big-fill" style="width:${pct}%"></div></div>
+        <div class="progress-label" style="margin-top:8px">${prefs.totalSeen} / ${FACTS.length}</div>
+      </div>
+      <div class="card-section">
+        <div class="section-head">Catégories actives</div>
+        ${prefs.activeCats.map(id => {
+          const cat = CATEGORIES[id];
+          const count = FACTS.filter(f => f.cat === id).length;
+          return `<div class="cat-stat">
+            <span style="color:${cat.color}">${cat.emoji} ${cat.label}</span>
+            <span class="cat-stat-count">${count} anecdotes</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+// ── Nav ───────────────────────────────────────────────────────
 function buildNav() {
   const tabs = [
-    { id: 'home',   icon: '🏠', label: 'Accueil' },
-    { id: 'config', icon: '⚙️', label: 'Réglages' },
-    { id: 'stats',  icon: '📊', label: 'Stats' },
+    { id: 'home',   svg: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9,22 9,12 15,12 15,22"/></svg>`, label: 'Accueil' },
+    { id: 'config', svg: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`, label: 'Réglages' },
+    { id: 'stats',  svg: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`, label: 'Stats' },
   ];
   return `
-    <nav class="bottom-nav">
+    <nav class="nav">
       ${tabs.map(t => `
-        <button class="nav-btn ${currentView === t.id ? 'nav-active' : ''}" data-view="${t.id}">
-          <span class="nav-icon">${t.icon}</span>
-          <span class="nav-label">${t.label}</span>
-        </button>
-      `).join('')}
-    </nav>
-  `;
+        <button class="nav-btn ${currentView === t.id ? 'nav-on' : ''}" data-view="${t.id}">
+          <span class="nav-svg">${t.svg}</span>
+          <span class="nav-lbl">${t.label}</span>
+        </button>`).join('')}
+    </nav>`;
 }
 
 // ── Events ────────────────────────────────────────────────────
 function attachEvents() {
-  // Nav
-  document.querySelectorAll('[data-view]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      currentView = btn.dataset.view;
-      render();
-    });
-  });
+  document.querySelectorAll('[data-view]').forEach(b =>
+    b.addEventListener('click', () => { currentView = b.dataset.view; render(); }));
 
-  // Home
   document.getElementById('btn-first')?.addEventListener('click', loadNewFact);
   document.getElementById('btn-next')?.addEventListener('click', loadNewFact);
   document.getElementById('card')?.addEventListener('click', () => {
     isFlipped = !isFlipped;
-    document.getElementById('card')?.classList.toggle('flipped', isFlipped);
+    document.getElementById('card').classList.toggle('flipped', isFlipped);
   });
   document.getElementById('btn-share')?.addEventListener('click', () => {
-    if (navigator.share && currentFact) {
-      navigator.share({ title: 'CultureBot', text: currentFact.text });
-    } else if (currentFact) {
-      navigator.clipboard?.writeText(currentFact.text);
-      showToast('📋 Copié dans le presse-papier !');
-    }
+    if (navigator.share && currentFact) navigator.share({ title: 'CultureBot', text: currentFact.text });
+    else { navigator.clipboard?.writeText(currentFact?.text || ''); toast('Copié !'); }
   });
-  document.getElementById('btn-fav')?.addEventListener('click', () => {
-    showToast('⭐ Mis en favori !');
-  });
+  document.getElementById('btn-save')?.addEventListener('click', () => toast('Sauvegardé ⭐'));
 
-  // Config — toggle notif
-  document.getElementById('toggle-notif')?.addEventListener('change', async (e) => {
+  document.getElementById('toggle-notif')?.addEventListener('change', async e => {
     if (e.target.checked) {
       const ok = await requestNotifPermission();
-      if (!ok) {
-        e.target.checked = false;
-        showToast('⚠️ Autorise les notifications dans les réglages');
-        return;
-      }
+      if (!ok) { e.target.checked = false; toast('Autorise les notifications dans les réglages'); return; }
     }
     prefs.notifEnabled = e.target.checked;
     savePrefs(prefs);
-    scheduleNotif().catch(console.error);
+    await scheduleNotif().catch(console.error);
+    toast(prefs.notifEnabled ? 'Notifications activées 🔔' : 'Notifications désactivées');
   });
 
-  // Config — intervals
-  document.querySelectorAll('[data-val]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      prefs.intervalMin = parseInt(btn.dataset.val, 10);
+  document.querySelectorAll('[data-val]').forEach(b =>
+    b.addEventListener('click', async () => {
+      prefs.intervalMin = parseInt(b.dataset.val, 10);
       savePrefs(prefs);
-      await scheduleNotif();
+      await scheduleNotif().catch(console.error);
       render();
-    });
-  });
+    }));
 
-  // Config — categories
-  document.querySelectorAll('[data-cat]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const id = btn.dataset.cat;
-      const isOn = prefs.activeCats.includes(id);
-      if (isOn && prefs.activeCats.length === 1) {
-        showToast('⚠️ Au moins une catégorie requise !');
-        return;
-      }
-      prefs.activeCats = isOn
-        ? prefs.activeCats.filter(c => c !== id)
-        : [...prefs.activeCats, id];
+  document.querySelectorAll('[data-cat]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const id = b.dataset.cat;
+      const on = prefs.activeCats.includes(id);
+      if (on && prefs.activeCats.length === 1) { toast('Au moins une catégorie requise'); return; }
+      prefs.activeCats = on ? prefs.activeCats.filter(c => c !== id) : [...prefs.activeCats, id];
       savePrefs(prefs);
-      await scheduleNotif();
+      await scheduleNotif().catch(console.error);
       render();
-    });
-  });
+    }));
 
-  // Config — reset
-  document.getElementById('btn-reset-history')?.addEventListener('click', () => {
-    prefs.recentIds = [];
-    savePrefs(prefs);
-    showToast('✅ Historique réinitialisé !');
+  document.getElementById('btn-reset')?.addEventListener('click', () => {
+    prefs.recentIds = []; savePrefs(prefs); toast('Historique réinitialisé');
   });
 }
 
-function showToast(msg) {
-  const existing = document.querySelector('.toast');
-  if (existing) existing.remove();
-  const t = document.createElement('div');
-  t.className = 'toast';
-  t.textContent = msg;
-  document.body.appendChild(t);
-  setTimeout(() => t.remove(), 2800);
+function toast(msg) {
+  document.querySelector('.toast')?.remove();
+  const el = Object.assign(document.createElement('div'), { className: 'toast', textContent: msg });
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
 }
 
 // ── Styles ────────────────────────────────────────────────────
 function buildStyles() {
   return `<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,700;1,700&display=swap');
+
     :root {
-      --bg: #050a14;
-      --surface: rgba(255,255,255,0.04);
-      --border: rgba(255,255,255,0.08);
-      --text: #f0f4ff;
-      --muted: rgba(255,255,255,0.45);
-      --accent: #2979ff;
-      --font-head: 'Syne', sans-serif;
-      --font-body: 'DM Sans', sans-serif;
+      --bg:      #09090f;
+      --bg2:     #111118;
+      --surface: rgba(255,255,255,0.045);
+      --border:  rgba(255,255,255,0.07);
+      --text:    #f1f1f5;
+      --muted:   rgba(255,255,255,0.38);
+      --accent:  #7C3AED;
+      --accent2: #a78bfa;
+      --radius:  20px;
     }
 
-    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; background: var(--bg); overflow: hidden; }
+    #app { height: 100%; }
 
     .shell {
       height: 100vh;
-      display: flex;
-      flex-direction: column;
-      background: var(--bg);
-      color: var(--text);
-      font-family: var(--font-body);
-      overflow: hidden;
+      display: flex; flex-direction: column;
+      background: var(--bg); color: var(--text);
+      font-family: 'Inter', sans-serif; overflow: hidden;
+      /* Respect de la safe area native Android (Capacitor gère ça) */
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
     }
 
-    /* Status bar */
-    .status-bar {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 6px 20px; font-size: 12px; color: var(--muted);
-      background: #080f1e;
-    }
-
-    /* Header */
+    /* ── Header (sans barre de statut) ── */
     .header {
-      padding: 12px 20px 10px;
-      background: #080f1e;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 20px 24px 16px;
+      background: var(--bg);
       border-bottom: 1px solid var(--border);
-      display: flex; justify-content: space-between; align-items: center;
+      flex-shrink: 0;
     }
-    .header-title {
-      font-family: var(--font-head);
-      font-weight: 800; font-size: 20px;
+    .header-left {
+      font-family: 'Playfair Display', serif;
+      font-size: 22px; font-weight: 700; color: var(--text);
+      display: flex; align-items: center; gap: 8px;
     }
-    .streak {
-      font-size: 13px; color: #ff9800;
-      background: rgba(255,152,0,0.1);
-      padding: 3px 10px; border-radius: 20px;
-      border: 1px solid rgba(255,152,0,0.2);
+    .logo-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--accent2); box-shadow: 0 0 10px var(--accent);
+    }
+    .streak-pill {
+      background: rgba(124,58,237,0.15);
+      border: 1px solid rgba(124,58,237,0.3);
+      color: var(--accent2);
+      font-size: 12px; font-weight: 600;
+      padding: 4px 12px; border-radius: 20px;
     }
 
-    /* Body */
-    .body { flex: 1; overflow: hidden; position: relative; }
+    /* ── Body ── */
+    .body { flex: 1; overflow: hidden; min-height: 0; }
 
-    /* ── HOME ─── */
+    /* ── Welcome ── */
     .welcome {
       height: 100%; display: flex; flex-direction: column;
       align-items: center; justify-content: center;
-      padding: 24px; text-align: center; gap: 16px;
+      padding: 32px 28px; text-align: center; gap: 20px;
     }
-    .welcome-icon { font-size: 72px; animation: pulse 3s infinite; }
-    .welcome-title { font-family: var(--font-head); font-size: 28px; font-weight: 800; }
-    .welcome-sub { color: var(--muted); font-size: 15px; line-height: 1.5; }
+    .welcome-orb {
+      font-size: 64px;
+      filter: drop-shadow(0 0 24px rgba(124,58,237,0.5));
+      animation: float 4s ease-in-out infinite;
+    }
+    .welcome-title {
+      font-family: 'Playfair Display', serif;
+      font-size: 34px; line-height: 1.25; color: var(--text);
+    }
+    .welcome-sub { font-size: 15px; color: var(--muted); line-height: 1.6; }
 
-    .fact-container {
+    /* ── Home ── */
+    .home-wrap {
       height: 100%; display: flex; flex-direction: column;
-      align-items: center; padding: 16px 20px; gap: 14px;
-      overflow: hidden;
+      padding: 20px 20px 16px; gap: 14px; overflow: hidden;
+    }
+    .cat-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: color-mix(in srgb, var(--c, var(--accent)) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--c, var(--accent)) 30%, transparent);
+      color: var(--c, var(--accent2));
+      font-size: 12px; font-weight: 600; letter-spacing: 0.3px;
+      padding: 5px 14px; border-radius: 20px; align-self: flex-start;
     }
 
-    .cat-badge {
-      font-size: 13px; font-weight: 600;
-      padding: 4px 14px; border-radius: 20px; border: 1px solid;
-      letter-spacing: 0.5px;
-    }
-
-    /* Card flip */
+    /* ── Card ── */
     .card {
-      width: 100%; flex: 1;
-      position: relative; cursor: pointer;
-      perspective: 1000px;
+      flex: 1; position: relative; cursor: pointer;
       transform-style: preserve-3d;
       transition: transform 0.55s cubic-bezier(0.4,0,0.2,1);
-      max-height: 340px;
+      max-height: 360px; min-height: 0;
     }
     .card.flipped { transform: rotateY(180deg); }
-
     .card-front, .card-back {
       position: absolute; inset: 0;
-      backface-visibility: hidden;
-      -webkit-backface-visibility: hidden;
-      border-radius: 24px;
-      border: 1px solid var(--border);
-      overflow: hidden;
+      backface-visibility: hidden; -webkit-backface-visibility: hidden;
+      border-radius: var(--radius); border: 1px solid var(--border);
+      background: var(--bg2); overflow: hidden;
     }
-
-    .card-front {
-      background: linear-gradient(160deg, #0d1a2e 0%, #080f1e 100%);
-      display: flex; flex-direction: column;
-    }
-    .card-glow {
-      position: absolute; top: -60px; right: -60px;
-      width: 200px; height: 200px;
-      border-radius: 50%; opacity: 0.08;
-      filter: blur(40px);
-    }
-    .card-content {
-      flex: 1; display: flex; align-items: center;
-      padding: 28px 24px; position: relative; z-index: 1;
-    }
+    .card-glow { position: absolute; inset: 0; pointer-events: none; }
+    .card-front { display: flex; flex-direction: column; }
     .fact-text {
-      font-family: var(--font-body);
-      font-size: 16px; line-height: 1.65;
-      font-weight: 400; color: var(--text);
+      flex: 1;
+      font-family: 'Playfair Display', serif;
+      font-size: 17px; line-height: 1.75; color: var(--text);
+      padding: 28px 26px;
+      position: relative; z-index: 1;
+      display: flex; align-items: center;
+      font-style: italic;
     }
-    .card-hint {
-      padding: 10px 20px;
-      font-size: 11px; color: rgba(255,255,255,0.25);
-      text-align: center; position: relative; z-index: 1;
+    .card-tap {
+      padding: 12px 24px; font-size: 11px; color: var(--muted);
+      text-align: center; letter-spacing: 0.5px; text-transform: uppercase;
+      border-top: 1px solid var(--border);
     }
-
     .card-back {
-      background: linear-gradient(160deg, #0d1a2e 0%, #080f1e 100%);
       transform: rotateY(180deg);
       display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 10px;
+      align-items: center; justify-content: center; gap: 12px;
     }
-    .back-emoji { font-size: 52px; }
-    .back-cat { font-family: var(--font-head); font-size: 22px; font-weight: 700; }
+    .back-icon { font-size: 52px; filter: drop-shadow(0 0 20px rgba(124,58,237,0.4)); }
+    .back-label { font-family: 'Playfair Display', serif; font-size: 22px; color: var(--text); }
     .back-num { font-size: 13px; color: var(--muted); }
 
-    /* Actions */
-    .action-row {
-      display: flex; align-items: center; gap: 12px; width: 100%;
+    /* ── Actions ── */
+    .actions { display: flex; align-items: center; gap: 12px; }
+    .cta {
+      background: var(--accent); border: none; border-radius: 14px;
+      color: #fff; font-family: 'Inter', sans-serif;
+      font-size: 15px; font-weight: 600;
+      padding: 14px 28px; cursor: pointer;
+      box-shadow: 0 4px 20px rgba(124,58,237,0.35);
+      transition: opacity 0.15s, transform 0.15s;
     }
-    .btn-main {
-      flex: 1; padding: 14px;
-      background: linear-gradient(135deg, var(--accent), #1565c0);
-      border: none; border-radius: 16px;
-      color: #fff; font-family: var(--font-head);
-      font-size: 15px; font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 6px 24px rgba(41,121,255,0.3);
-      transition: transform 0.15s, box-shadow 0.15s;
-    }
-    .btn-main:active { transform: scale(0.97); box-shadow: none; }
-
-    .btn-action {
-      width: 50px; height: 50px; border-radius: 16px;
+    .cta:active { opacity: 0.85; transform: scale(0.97); }
+    .flex-cta { flex: 1; }
+    .icon-btn {
+      width: 50px; height: 50px; border-radius: 14px;
       background: var(--surface); border: 1px solid var(--border);
-      font-size: 20px; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      color: white; transition: background 0.2s;
-    }
-    .btn-action:active { background: rgba(255,255,255,0.1); }
-
-    /* Progress */
-    .progress-bar {
-      width: 100%; height: 4px; background: var(--border);
-      border-radius: 4px; overflow: hidden;
-    }
-    .progress-fill { height: 100%; border-radius: 4px; transition: width 0.6s; }
-    .progress-label { font-size: 11px; color: var(--muted); }
-
-    /* ── CONFIG ─── */
-    .config-scroll {
-      height: 100%; overflow-y: auto;
-      padding: 16px 20px; display: flex;
-      flex-direction: column; gap: 16px;
-    }
-    .config-section {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 20px; padding: 18px;
-    }
-    .section-title {
-      font-family: var(--font-head);
-      font-size: 13px; font-weight: 700;
-      letter-spacing: 1px; text-transform: uppercase;
-      color: var(--accent); margin-bottom: 14px;
-    }
-
-    .notif-row {
-      display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    }
-    .notif-label { font-size: 15px; font-weight: 500; }
-    .notif-sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
-
-    /* Toggle switch */
-    .toggle { position: relative; width: 48px; height: 26px; flex-shrink: 0; }
-    .toggle input { opacity: 0; width: 0; height: 0; }
-    .toggle-slider {
-      position: absolute; inset: 0;
-      background: rgba(255,255,255,0.1); border-radius: 26px;
-      transition: background 0.3s; cursor: pointer;
-    }
-    .toggle-slider::before {
-      content: ''; position: absolute;
-      width: 20px; height: 20px; left: 3px; top: 3px;
-      background: white; border-radius: 50%;
-      transition: transform 0.3s;
-    }
-    .toggle input:checked + .toggle-slider { background: var(--accent); }
-    .toggle input:checked + .toggle-slider::before { transform: translateX(22px); }
-
-    .interval-list { display: flex; flex-direction: column; gap: 8px; }
-    .interval-btn {
-      display: flex; align-items: center; gap: 12px;
-      background: rgba(255,255,255,0.03);
-      border: 1.5px solid var(--border);
-      border-radius: 14px; padding: 11px 14px;
-      color: var(--text); cursor: pointer;
-      font-family: var(--font-body); font-size: 14px;
-      transition: all 0.2s;
-    }
-    .interval-btn.active {
-      background: rgba(41,121,255,0.12);
-      border-color: var(--accent);
-    }
-    .iv-emoji { font-size: 18px; }
-    .iv-label { flex: 1; text-align: left; }
-    .iv-badge {
-      background: var(--accent); border-radius: 20px;
-      padding: 2px 10px; font-size: 11px; font-weight: 700;
-    }
-
-    .cat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .cat-btn {
-      padding: 11px 8px; border-radius: 14px;
-      background: rgba(255,255,255,0.03);
-      border: 1.5px solid var(--border);
       color: var(--muted); cursor: pointer;
-      font-family: var(--font-body); font-size: 13px;
-      transition: all 0.2s;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.2s, color 0.2s; flex-shrink: 0;
     }
-    .cat-btn.cat-on { font-weight: 600; }
+    .icon-btn svg { width: 20px; height: 20px; display: block; }
+    .icon-btn:active { background: rgba(255,255,255,0.08); color: var(--text); }
 
-    .btn-reset {
-      background: rgba(255,255,255,0.06);
-      box-shadow: none; color: var(--muted);
-      font-size: 14px;
-    }
+    /* ── Progress ── */
+    .progress-wrap { display: flex; flex-direction: column; gap: 6px; }
+    .progress-track { height: 3px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 3px; transition: width 0.7s ease; }
+    .progress-label { font-size: 11px; color: var(--muted); text-align: center; }
 
-    /* ── STATS ─── */
-    .stats-scroll {
+    /* ── Scroll wrap ── */
+    .scroll-wrap {
       height: 100%; overflow-y: auto;
-      padding: 16px 20px; display: flex;
-      flex-direction: column; gap: 14px;
+      padding: 20px; display: flex; flex-direction: column; gap: 14px;
     }
-    .stat-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 20px; padding: 20px;
-    }
-    .stat-card.big { text-align: center; }
-    .stat-num {
-      font-family: var(--font-head);
-      font-size: 48px; font-weight: 800;
-      color: var(--accent);
-    }
-    .stat-label { font-size: 14px; color: var(--muted); margin-top: 4px; }
-    .stat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-    .stat-row .stat-num { font-size: 36px; }
+    .scroll-wrap::-webkit-scrollbar { width: 0; }
 
-    .big-progress {
-      height: 10px; background: var(--border);
-      border-radius: 10px; overflow: hidden;
+    /* ── Card section ── */
+    .card-section {
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px;
     }
+    .section-head {
+      font-size: 11px; font-weight: 700; letter-spacing: 1.4px;
+      text-transform: uppercase; color: var(--accent2); margin-bottom: 16px;
+    }
+    .row-between { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .row-title { font-size: 15px; font-weight: 500; }
+    .row-sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+
+    /* ── Toggle ── */
+    .switch { position: relative; width: 50px; height: 28px; flex-shrink: 0; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch-track {
+      position: absolute; inset: 0;
+      background: rgba(255,255,255,0.1); border-radius: 28px;
+      cursor: pointer; transition: background 0.3s;
+    }
+    .switch-track::before {
+      content: ''; position: absolute;
+      width: 22px; height: 22px; left: 3px; top: 3px;
+      background: #fff; border-radius: 50%;
+      transition: transform 0.3s; box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+    .switch input:checked + .switch-track { background: var(--accent); }
+    .switch input:checked + .switch-track::before { transform: translateX(22px); }
+
+    /* ── Interval list ── */
+    .iv-list { display: flex; flex-direction: column; gap: 6px; }
+    .iv-row {
+      display: flex; align-items: center; gap: 12px;
+      background: rgba(255,255,255,0.025); border: 1px solid var(--border);
+      border-radius: 12px; padding: 11px 14px;
+      color: var(--muted); cursor: pointer;
+      font-family: 'Inter', sans-serif; font-size: 14px;
+      transition: all 0.2s; text-align: left;
+    }
+    .iv-row.iv-active {
+      background: rgba(124,58,237,0.1);
+      border-color: rgba(124,58,237,0.4); color: var(--text);
+    }
+    .iv-icon { font-size: 17px; }
+    .iv-text { flex: 1; }
+    .iv-badge {
+      background: var(--accent); color: #fff;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+      padding: 2px 9px; border-radius: 20px;
+    }
+
+    /* ── Category grid ── */
+    .cat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .cat-pill {
+      padding: 10px 8px; border-radius: 12px;
+      background: rgba(255,255,255,0.025); border: 1px solid var(--border);
+      color: var(--muted); cursor: pointer;
+      font-family: 'Inter', sans-serif; font-size: 13px; transition: all 0.2s;
+    }
+    .cat-pill.cat-on {
+      background: color-mix(in srgb, var(--c, var(--accent)) 12%, transparent);
+      border-color: color-mix(in srgb, var(--c, var(--accent)) 40%, transparent);
+      color: var(--c, var(--accent2)); font-weight: 600;
+    }
+
+    /* Ghost btn */
+    .ghost-btn {
+      background: none; border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 14px;
+      color: var(--muted); font-family: 'Inter', sans-serif;
+      font-size: 14px; cursor: pointer; width: 100%;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .ghost-btn:active { border-color: rgba(255,255,255,0.2); color: var(--text); }
+
+    /* ── Stats ── */
+    .stats-hero {
+      background: linear-gradient(135deg, rgba(124,58,237,0.15), rgba(124,58,237,0.05));
+      border: 1px solid rgba(124,58,237,0.2);
+      border-radius: var(--radius); padding: 28px; text-align: center;
+    }
+    .stats-hero-num {
+      font-family: 'Playfair Display', serif;
+      font-size: 64px; font-weight: 700; color: var(--accent2); line-height: 1;
+    }
+    .stats-hero-label { font-size: 14px; color: var(--muted); margin-top: 8px; }
+    .stat-row-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .stat-mini {
+      background: var(--bg2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 18px; text-align: center;
+    }
+    .stat-mini-num { font-family: 'Playfair Display', serif; font-size: 36px; font-weight: 700; color: var(--text); }
+    .stat-mini-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .big-track { height: 8px; background: var(--border); border-radius: 8px; overflow: hidden; }
     .big-fill {
-      height: 100%; border-radius: 10px;
-      background: linear-gradient(90deg, var(--accent), #00e5ff);
-      transition: width 0.8s;
+      height: 100%; border-radius: 8px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      transition: width 0.8s ease;
     }
-    .cat-stat-row {
-      display: flex; justify-content: space-between;
-      padding: 9px 0; border-bottom: 1px solid var(--border);
-      font-size: 14px;
+    .cat-stat {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px;
     }
-    .cat-stat-row:last-child { border-bottom: none; }
+    .cat-stat:last-child { border-bottom: none; }
+    .cat-stat-count { font-size: 12px; color: var(--muted); }
 
-    /* ── NAV ─── */
-    .bottom-nav {
-      display: flex; background: #080f1e;
+    /* ── Nav ── */
+    .nav {
+      display: flex; background: var(--bg2);
       border-top: 1px solid var(--border);
-      padding: 6px 0 14px;
+      padding: 10px 0 20px; flex-shrink: 0;
     }
     .nav-btn {
       flex: 1; display: flex; flex-direction: column;
-      align-items: center; gap: 3px;
+      align-items: center; gap: 4px;
       background: none; border: none; cursor: pointer;
-      padding: 6px 4px; color: var(--muted);
-      transition: color 0.2s;
+      padding: 6px 4px; color: var(--muted); transition: color 0.2s;
     }
-    .nav-btn.nav-active { color: var(--accent); }
-    .nav-icon { font-size: 20px; }
-    .nav-label { font-size: 10px; font-family: var(--font-body); }
+    .nav-btn.nav-on { color: var(--accent2); }
+    .nav-svg svg { width: 22px; height: 22px; display: block; }
+    .nav-lbl { font-size: 10px; font-family: 'Inter', sans-serif; letter-spacing: 0.3px; }
 
-    /* Toast */
+    /* ── Toast ── */
     .toast {
-      position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
-      background: rgba(30,40,60,0.95);
-      border: 1px solid var(--border);
-      color: var(--text); font-size: 13px;
-      padding: 10px 20px; border-radius: 20px;
-      z-index: 999; white-space: nowrap;
-      animation: toastIn 0.3s ease, toastOut 0.4s ease 2.4s forwards;
-      backdrop-filter: blur(12px);
+      position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+      background: rgba(20,20,30,0.95); backdrop-filter: blur(16px);
+      border: 1px solid var(--border); color: var(--text);
+      font-size: 13px; font-family: 'Inter', sans-serif;
+      padding: 10px 20px; border-radius: 20px; white-space: nowrap;
+      z-index: 999;
+      animation: tin 0.25s ease, tout 0.3s ease 2.3s forwards;
     }
 
-    @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.06)} }
-    @keyframes toastIn { from{opacity:0;transform:translateX(-50%) translateY(10px)} to{opacity:1;transform:translateX(-50%) translateY(0)} }
-    @keyframes toastOut { to{opacity:0;transform:translateX(-50%) translateY(10px)} }
+    @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }
+    @keyframes tin  { from{opacity:0;transform:translateX(-50%) translateY(8px)} }
+    @keyframes tout { to  {opacity:0;transform:translateX(-50%) translateY(8px)} }
   </style>`;
 }
 
 // ── Init ──────────────────────────────────────────────────────
-LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
-  const factId = action.notification.extra?.factId;
-  if (factId) {
-    const fact = FACTS.find(f => f.id === factId);
-    if (fact) {
-      currentFact = fact;
-      prefs.recentIds = [fact.id, ...prefs.recentIds].slice(0, 30);
-      prefs.totalSeen++;
-      savePrefs(prefs);
-    }
-  } else {
-    currentFact = getRandomFact(prefs.activeCats, prefs.recentIds);
-  }
-  currentView = 'home';
-  isFlipped = false;
-  render();
-});
 render();
-scheduleNotif();
+scheduleNotif().catch(console.error);
