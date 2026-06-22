@@ -3,7 +3,23 @@
 
 import { FACTS, CATEGORIES, getRandomFact } from './facts.js';
 import { LocalNotifications } from '@capacitor/local-notifications';
-
+// Écoute le clic sur une notification → affiche le fait correspondant
+LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
+  const body = action.notification.body;
+  if (body) {
+    // Retrouve le fait correspondant au texte de la notification
+    const fact = FACTS.find(f => f.text === body);
+    if (fact) {
+      currentFact = fact;
+    } else {
+      // Texte non trouvé (tronqué par Android) → charge un fait aléatoire
+      currentFact = getRandomFact(prefs.activeCats, prefs.recentIds);
+    }
+    currentView = 'home';
+    isFlipped = false;
+    render();
+  }
+});
 // ── Storage helpers ───────────────────────────────────────────
 const STORAGE_KEY = 'culturebot_prefs';
 
@@ -72,6 +88,8 @@ async function scheduleNotif() {
       schedule: { at: new Date(Date.now() + intervalMs * (i + 1)) },
       smallIcon: 'ic_stat_brain',
       iconColor: '#2979FF',
+      actionTypeId: 'OPEN_FACT',
+      extra: { factId: fact.id },
     });
   }
 
@@ -728,5 +746,22 @@ function buildStyles() {
 }
 
 // ── Init ──────────────────────────────────────────────────────
+LocalNotifications.addListener('localNotificationActionPerformed', (action) => {
+  const factId = action.notification.extra?.factId;
+  if (factId) {
+    const fact = FACTS.find(f => f.id === factId);
+    if (fact) {
+      currentFact = fact;
+      prefs.recentIds = [fact.id, ...prefs.recentIds].slice(0, 30);
+      prefs.totalSeen++;
+      savePrefs(prefs);
+    }
+  } else {
+    currentFact = getRandomFact(prefs.activeCats, prefs.recentIds);
+  }
+  currentView = 'home';
+  isFlipped = false;
+  render();
+});
 render();
 scheduleNotif();
